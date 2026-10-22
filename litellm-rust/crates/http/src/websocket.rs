@@ -1,6 +1,9 @@
 use http::{
     HeaderMap, HeaderValue, StatusCode,
-    header::{CONNECTION, SEC_WEBSOCKET_ACCEPT, SEC_WEBSOCKET_KEY, SEC_WEBSOCKET_VERSION, UPGRADE},
+    header::{
+        CONNECTION, SEC_WEBSOCKET_ACCEPT, SEC_WEBSOCKET_KEY, SEC_WEBSOCKET_PROTOCOL,
+        SEC_WEBSOCKET_VERSION, UPGRADE,
+    },
 };
 use reqwest::Url;
 use tokio_tungstenite::{
@@ -21,6 +24,7 @@ pub async fn connect(
     url: &str,
     headers: HeaderMap,
 ) -> Result<UpstreamWebSocket, Error> {
+    let offered_protocols = headers.get(SEC_WEBSOCKET_PROTOCOL).cloned();
     let key = generate_key();
     let response = client
         .get(http_url(url)?)
@@ -46,8 +50,53 @@ pub async fn connect(
             "WebSocket handshake returned a wrong Sec-WebSocket-Accept".into(),
         ));
     }
+    validate_response_headers(response.headers(), offered_protocols.as_ref())?;
     let upgraded = response.upgrade().await?;
     Ok(WebSocketStream::from_raw_socket(upgraded, Role::Client, None).await)
+}
+
+fn validate_response_headers(
+    headers: &HeaderMap,
+    offered_protocols: Option<&HeaderValue>,
+) -> Result<(), Error> {
+    if !headers
+        .get(UPGRADE)
+        .is_some_and(|value| value.as_bytes().eq_ignore_ascii_case(b"websocket"))
+    {
+        return Err(Error::Network(
+            "WebSocket handshake returned an invalid Upgrade header".into(),
+        ));
+    }
+    if !headers.get_all(CONNECTION).iter().any(|value| {
+        value.to_str().is_ok_and(|value| {
+            value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
+        })
+    }) {
+        return Err(Error::Network(
+            "WebSocket handshake returned an invalid Connection header".into(),
+        ));
+    }
+    let protocol_matches = match (offered_protocols, headers.get(SEC_WEBSOCKET_PROTOCOL)) {
+        (None, None) => true,
+        (Some(offered), Some(selected)) => offered
+            .to_str()
+            .ok()
+            .zip(selected.to_str().ok())
+            .is_some_and(|(offered, selected)| {
+                offered
+                    .split(',')
+                    .any(|protocol| protocol.trim() == selected)
+            }),
+        _ => false,
+    };
+    if !protocol_matches {
+        return Err(Error::Network(
+            "WebSocket handshake returned an invalid subprotocol".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn http_url(url: &str) -> Result<Url, Error> {

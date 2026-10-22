@@ -376,3 +376,97 @@ async fn invalid_url_is_rejected_before_dispatch(#[case] url: &str) {
 
     assert!(matches!(result, Err(Error::Connect(_))));
 }
+
+#[rstest]
+#[case::missing_upgrade(None, Some("Upgrade"), None, None, false)]
+#[case::wrong_upgrade(Some("http"), Some("Upgrade"), None, None, false)]
+#[case::missing_connection(Some("websocket"), None, None, None, false)]
+#[case::wrong_connection(Some("websocket"), Some("keep-alive"), None, None, false)]
+#[case::unsolicited_protocol(Some("websocket"), Some("Upgrade"), None, Some("other"), false)]
+#[case::unoffered_protocol(
+    Some("websocket"),
+    Some("Upgrade"),
+    Some("events"),
+    Some("other"),
+    false
+)]
+#[case::missing_protocol(Some("websocket"), Some("Upgrade"), Some("events"), None, false)]
+#[case::matching_protocol(
+    Some("websocket"),
+    Some("Upgrade"),
+    Some("events"),
+    Some("events"),
+    true
+)]
+#[case::multiple_offers(
+    Some("websocket"),
+    Some("Upgrade"),
+    Some("events, realtime"),
+    Some("realtime"),
+    true
+)]
+#[case::case_insensitive_upgrade(Some("WebSocket"), Some("uPgRaDe"), None, None, true)]
+#[case::connection_tokens(Some("websocket"), Some("keep-alive, Upgrade"), None, None, true)]
+#[tokio::test]
+async fn upgrade_validates_headers_and_negotiated_protocol(
+    #[case] upgrade: Option<&'static str>,
+    #[case] connection: Option<&'static str>,
+    #[case] offered: Option<&'static str>,
+    #[case] selected: Option<&'static str>,
+    #[case] accepted: bool,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        #[expect(
+            clippy::result_large_err,
+            reason = "tungstenite requires an unboxed handshake error response"
+        )]
+        let result = accept_hdr_async(stream, move |_: &Request, mut response: Response| {
+            response.headers_mut().remove("upgrade");
+            response.headers_mut().remove("connection");
+            if let Some(value) = upgrade {
+                response
+                    .headers_mut()
+                    .insert("upgrade", HeaderValue::from_static(value));
+            }
+            if let Some(value) = connection {
+                response
+                    .headers_mut()
+                    .insert("connection", HeaderValue::from_static(value));
+            }
+            if let Some(value) = selected {
+                response
+                    .headers_mut()
+                    .insert("sec-websocket-protocol", HeaderValue::from_static(value));
+            }
+            Ok(response)
+        })
+        .await;
+        let Ok(mut socket) = result else {
+            return;
+        };
+        if let Some(Ok(message)) = socket.next().await {
+            let _ = socket.send(message).await;
+        }
+    });
+    let headers = offered.map_or_else(HeaderMap::new, |value| {
+        HeaderMap::from_iter([(
+            http::header::SEC_WEBSOCKET_PROTOCOL,
+            HeaderValue::from_static(value),
+        )])
+    });
+    let result = open(
+        &config(Verify::BuiltInRoots),
+        &format!("ws://{address}/responses"),
+        headers,
+    )
+    .await;
+
+    match result {
+        Ok(mut socket) if accepted => round_trip(&mut socket).await,
+        Err(Error::Network(_)) if !accepted => {}
+        other => panic!("unexpected handshake outcome: {:?}", other.map(drop)),
+    }
+}
