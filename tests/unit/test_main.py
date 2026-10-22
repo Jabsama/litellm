@@ -9643,6 +9643,37 @@ async def test_atranscription_answers_a_non_string_provider_hint_with_a_bad_requ
     assert not respx_mock.calls
 
 
+def test_transcription_rejects_an_unsupported_provider_without_an_http_call(respx_mock: respx.MockRouter) -> None:
+    model: Final = "test-transcription-model"
+    provider: Final = "anthropic"
+
+    with pytest.raises(litellm.BadRequestError) as raised:
+        litellm.transcription(model=f"{provider}/{model}", file=("speech.wav", b"RIFF-audio", "audio/wav"))
+
+    assert raised.value.status_code == 400
+    assert f"{provider} does not support audio transcription. Model: {model}" in raised.value.message
+    assert raised.value.model == model
+    assert raised.value.llm_provider == provider
+    assert not respx_mock.calls
+
+
+@pytest.mark.asyncio
+async def test_atranscription_rejects_an_unsupported_provider_without_an_http_call(
+    respx_mock: respx.MockRouter,
+) -> None:
+    model: Final = "test-transcription-model"
+    provider: Final = "anthropic"
+
+    with pytest.raises(litellm.BadRequestError) as raised:
+        await litellm.atranscription(model=f"{provider}/{model}", file=("speech.wav", b"RIFF-audio", "audio/wav"))
+
+    assert raised.value.status_code == 400
+    assert f"{provider} does not support audio transcription. Model: {model}" in raised.value.message
+    assert raised.value.model == model
+    assert raised.value.llm_provider == provider
+    assert not respx_mock.calls
+
+
 @pytest.mark.asyncio
 async def test_aspeech_infers_the_provider_from_base_url(respx_mock: respx.MockRouter) -> None:
     base_url: Final = "https://api.groq.com/openai/v1"
